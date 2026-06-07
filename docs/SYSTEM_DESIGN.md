@@ -198,11 +198,24 @@ class BaseProvider:
     async def acomplete(self, prompt: str, model: str, max_tokens: int) -> str: ...
 ```
 
-**Implementations:** `AnthropicProvider`, `OpenAIProvider`
+**Implementations:** `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider`
 
 **Factory:** `get_provider(name)` reads the `PROVIDER` env var. Adding a new
 provider requires implementing the two methods and registering the class in
 `get_provider()` — no changes anywhere else in the codebase.
+
+**OpenAI-compatible endpoints:** `OpenAIProvider` accepts an optional `base_url`
+parameter (or `OPENAI_BASE_URL` env var), enabling any OpenAI-compatible API:
+
+| Provider | `OPENAI_BASE_URL` |
+|---|---|
+| OpenAI | _(default)_ |
+| Groq | `https://api.groq.com/openai/v1` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| Together AI | `https://api.together.xyz/v1` |
+
+`GeminiProvider` is a convenience subclass of `OpenAIProvider` with the Gemini
+base URL hard-coded. Use `PROVIDER=gemini` + `GEMINI_API_KEY`.
 
 **Retry:** Both providers use `tenacity` with exponential backoff (3 attempts,
 1s initial wait, 2× multiplier). Applied at the provider level, not the proxy
@@ -210,7 +223,70 @@ level — the proxy sees a clean success or a final failure.
 
 ---
 
-### 6. Webhooks (`webhooks.py`)
+### 6. Hallucination Diff (`hallucination_diff.py`)
+
+**Responsibility:** Measure how consistently a model responds to the same prompt
+across multiple runs. Produces a reliability score and highlights unstable runs.
+
+**Key idea:** Instead of comparing one new call against historical calls (the
+proxy's job), the Hallucination Diff runs the *same prompt N times right now* and
+measures pairwise divergence across all run pairs.
+
+**Algorithm:**
+
+```
+Step 1 — Collect N responses
+  Call provider.complete(prompt, model) N times (sequentially or async)
+
+Step 2 — Pairwise divergence matrix (N × N)
+  For each pair (i, j):
+    div(i, j) = max(0.0, 1.0 - cosine_similarity(embed(response_i), embed(response_j)))
+
+Step 3 — Reliability score
+  all_pairs    = upper triangle of matrix (N*(N-1)/2 values)
+  mean_div     = mean(all_pairs)
+  reliability  = 1.0 - mean_div     # 0.0 = random, 1.0 = perfectly consistent
+
+Step 4 — Verdict
+  reliability >= 0.90  →  RELIABLE
+  reliability >= 0.70  →  UNSTABLE
+  reliability <  0.70  →  CRITICAL
+
+Step 5 — Median response
+  For each run i, compute average divergence from all other runs
+  Median response = run with the lowest average divergence (most central)
+
+Step 6 — Outlier flagging
+  For each run, compute divergence_from_median
+  is_outlier = divergence_from_median >= outlier_threshold (default 0.25)
+```
+
+**Key design decisions:**
+
+| Decision | Rationale |
+|---|---|
+| Pairwise matrix, not just mean | Exposes bimodal distributions where two clusters of consistent-but-different answers exist |
+| Median response, not mean | The median is always a real response; a mean embedding has no matching text |
+| `max(0.0, ...)` clamp | Cosine similarity can microscopically exceed 1.0 due to float32 arithmetic; clamping prevents `-0.00` in the display |
+| Sequential by default, async optional | Free-tier APIs have per-minute quotas; sequential runs with `RELIABILITY_RUN_DELAY` respects rate limits |
+| `RELIABILITY_RUN_DELAY` env var | Adds configurable delay between runs; set to 3-5 seconds for Groq/Gemini free tiers |
+
+**CLI usage:**
+
+```bash
+cg reliability "What is our refund policy?" --runs 10 --provider groq
+cg reliability "What is 2+2?" --runs 5 --outlier-threshold 0.15
+```
+
+**Known behaviour:** The reliability score measures *semantic phrasing consistency*,
+not factual correctness. A model that answers "The answer is 4." vs "2+2 equals 4."
+for the same factual question may score UNSTABLE (0.80) because the embedding model
+treats phrasing variation as divergence. This is expected — the tool is designed
+for open-ended domain questions where phrasing variance signals hallucination risk.
+
+---
+
+### 7. Webhooks (`webhooks.py`)
 
 **Responsibility:** POST a JSON payload to a configured URL on every violation.
 
@@ -325,7 +401,7 @@ a new infrastructure dependency. Warranted only at very high call volumes.
 
 ## Testing Strategy
 
-### Unit tests (existing — 24 tests)
+### Unit tests (24 tests)
 
 | Suite | What it tests |
 |---|---|
@@ -333,7 +409,7 @@ a new infrastructure dependency. Warranted only at very high call volumes.
 | `test_store.py` | SQLite schema, call persistence, violation storage, stats |
 | `test_providers.py` | Anthropic + OpenAI sync/async, factory, mocked — no API keys |
 
-### User flow tests (added — 7 tests)
+### User flow tests (7 tests)
 
 `tests/test_user_flows.py` tests the library as a developer would actually use it — no mocking of internals, only the LLM provider is mocked:
 
@@ -350,6 +426,29 @@ a new infrastructure dependency. Warranted only at very high call volumes.
 ### Key discovery from user testing
 
 ConsistencyGuard uses **global** consistency scope: `check_consistency()` scans all stored calls regardless of `agent_id`. A contradicting answer from `agent-b` on a prompt already answered by `agent-a` triggers a violation. This is intentional — cross-agent inconsistency is a real production risk — but must be documented so integrators are not surprised.
+
+### Hallucination Diff tests (14 tests)
+
+`tests/test_hallucination_diff.py` covers the reliability engine without any real API calls (providers are mocked to return fixed strings):
+
+| Test | What it verifies |
+|---|---|
+| `test_pairwise_matrix_diagonal_is_zero` | A response has zero divergence from itself |
+| `test_pairwise_matrix_is_symmetric` | `div(i,j) == div(j,i)` for all pairs |
+| `test_pairwise_matrix_identical_responses_near_zero` | Identical text → near-zero divergence; no `-0.00` values |
+| `test_median_response_returns_one_of_the_inputs` | Median is always a real response, not a synthetic one |
+| `test_median_response_on_identical_inputs` | All identical → any run qualifies as median |
+| `test_verdict_reliable` | Score ≥ 0.90 → "RELIABLE" |
+| `test_verdict_unstable` | 0.70 ≤ score < 0.90 → "UNSTABLE" |
+| `test_verdict_critical` | Score < 0.70 → "CRITICAL" |
+| `test_reliable_model_high_score` | Mock returning identical responses → reliability_score ≈ 1.0 |
+| `test_unreliable_model_low_score` | Mock returning random text → reliability_score < 0.90 |
+| `test_report_structure_fields` | `HallucinationDiffReport` has all required fields |
+| `test_run_results_have_correct_indices` | `run_index` starts at 1, not 0 |
+| `test_outlier_flagged_correctly` | Run with divergence ≥ threshold → `is_outlier=True` |
+| `test_max_divergence_gte_mean` | `max_pairwise_divergence >= mean_pairwise_divergence` always |
+
+**Total: 45 tests (24 unit + 7 user flows + 14 hallucination diff)**
 
 ---
 

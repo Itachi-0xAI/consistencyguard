@@ -13,6 +13,7 @@ from consistencyguard.reporter import (
     print_trend,
     print_agent_stats,
     export_violations,
+    print_hallucination_diff,
 )
 
 load_dotenv()
@@ -147,7 +148,7 @@ def health():
 @click.option("--model", default=None, help="Model name override")
 @click.option(
     "--provider", default=None,
-    type=click.Choice(["anthropic", "openai"], case_sensitive=False),
+    type=click.Choice(["anthropic", "openai", "gemini"], case_sensitive=False),
     help="LLM provider (default: PROVIDER env var or 'anthropic')",
 )
 def check(prompt, agent_id, model, provider):
@@ -175,3 +176,41 @@ def check(prompt, agent_id, model, provider):
             console.print(f"  [{v.severity.value}] {v.explanation}")
     else:
         console.print("[green]✓ No consistency violations.[/green]")
+
+
+@cli.command()
+@click.argument("prompt")
+@click.option("--runs", default=10, show_default=True, help="Number of times to run the prompt")
+@click.option("--model", default=None, help="Model name override")
+@click.option(
+    "--provider", default=None,
+    type=click.Choice(["anthropic", "openai", "gemini"], case_sensitive=False),
+    help="LLM provider",
+)
+@click.option("--outlier-threshold", default=0.25, show_default=True,
+              help="Divergence from median above which a run is flagged as outlier")
+def reliability(prompt, runs, model, provider, outlier_threshold):
+    """
+    Run PROMPT N times and measure output variance.
+
+    Produces a reliability score (0.0–1.0), per-run divergence,
+    pairwise matrix, and outlier detection.
+
+    Requires ANTHROPIC_API_KEY or OPENAI_API_KEY in .env.
+
+    Example:
+
+        cg reliability "What is the refund policy?" --runs 5
+    """
+    from consistencyguard.hallucination_diff import run_reliability_test
+
+    console.print(f"[dim]Running prompt {runs}× — this may take a moment...[/dim]\n")
+
+    report = run_reliability_test(
+        prompt=prompt,
+        runs=runs,
+        model=model,
+        provider=provider,
+        outlier_threshold=outlier_threshold,
+    )
+    print_hallucination_diff(report)

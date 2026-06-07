@@ -1,213 +1,250 @@
 # ConsistencyGuard
 
-**Real-time LLM output consistency monitor — detects when your AI agents give
-different answers to the same question, before your users notice.**
+**Your LLM said something different yesterday. You didn't notice. Your users did.**
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![CI](https://github.com/Itachi-0xAI/consistencyguard/actions/workflows/ci.yml/badge.svg)](https://github.com/Itachi-0xAI/consistencyguard/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/tests-45%20passing-brightgreen.svg)](#tests)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-24%20passing-brightgreen.svg)](#tests)
+[![Version](https://img.shields.io/badge/version-1.0.2-informational.svg)](CHANGELOG.md)
+
+---
+
+Real-time consistency monitor for LLM outputs. Wraps any LLM call with one function, detects when the same question gets a different answer across time or agents, and surfaces violations instantly — in your code and in the terminal. Zero infrastructure. No vector database. No API cost for detection.
 
 ---
 
 ## The Problem
 
-Deploying AI agents in production reveals a problem nobody talks about enough:
-**the same question gets different answers on different days.**
+Hallucinations are detectable — the model makes something up and it is obviously wrong. **Inconsistency is invisible.**
 
-While researching enterprise AI agent failures, I kept running into
-variations of the same story — a support agent tells one customer "no refunds
-after 30 days" and tells another "full refund within 60 days." A knowledge
-agent cites a policy that was updated last quarter. A sales agent quotes a
-price that changed last week. No error is thrown. No alert fires. The pipeline
-shows green. The damage is already done.
+Your support agent told one customer "full refund within 30 days" and told another "no refunds after purchase." No error was thrown. No alert fired. The pipeline showed green. Both answers were plausible. Just different.
 
-This is not a hallucination problem. Hallucinations are detectable — the model
-makes something up and it is obviously wrong. **Inconsistency is invisible.**
-The model gives a plausible answer both times. Just a different one.
-
-The scale of the problem is significant:
-
-- Most large enterprises now run AI agents in production across multiple business functions
-- The majority have no governance or monitoring strategy covering those agents
-- Individual organizations commonly manage dozens of deployed agents, many running without any logging
-- Inconsistent AI outputs in regulated industries — finance, healthcare, legal — create direct compliance exposure
-
-I looked for a cross-platform tool that detects output inconsistency in real
-time across any LLM provider. Nothing existed.
-
-**So I built ConsistencyGuard.**
-
----
-
-## What Existing Tools Miss
-
-Most LLM observability tools focus on cost, latency, and error rates.
-They tell you a call succeeded — not whether it said something different
-than it said yesterday to the same question.
-
-The gap across the current ecosystem:
-
-- **Tracing tools** record what was said but never compare it against past responses
-- **Cost and latency monitors** track performance, not semantic content
-- **ML drift detectors** were built for structured model outputs, not free-form text
-- **Platform-specific guardrails** lock you into a single provider
-- **Custom logging** captures responses but requires manual analysis to spot inconsistency
-
-None of them answer the question that matters most in production:
-**"Is my agent saying the same thing today that it said last week?"**
-
-ConsistencyGuard is purpose-built to answer exactly that — across any LLM
-provider, with zero infrastructure.
-
----
-
-## How It Works
-
-```
-Your App  →  guarded_call()  →  LLM API (Anthropic / OpenAI)
-                 │
-                 ├─ 1. embed(prompt)          ← local MiniLM, no API cost
-                 ├─ 2. similarity scan        ← SQLite, cosine similarity
-                 ├─ 3. if sim > 0.92          → compare responses
-                 ├─ 4. if divergence > 0.25   → CONSISTENCY VIOLATION
-                 └─ 5. log + webhook + report
-```
-
-| Severity | Divergence | Meaning |
-|----------|-----------|---------|
-| CRITICAL | ≥ 0.40 | Responses contradict each other |
-| WARNING  | ≥ 0.25 | Material difference in content |
-| INFO     | ≥ 0.10 | Minor phrasing variation |
+Most LLM observability tools track cost, latency, and errors. None of them answer: **"Is my agent saying the same thing today that it said last week?"** ConsistencyGuard is built to answer exactly that.
 
 ---
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/sameerpashasyed17-collab/consistencyguard.git
+git clone https://github.com/Itachi-0xAI/consistencyguard.git
 cd consistencyguard
 pip install -e .
 cp .env.example .env
-# Add your ANTHROPIC_API_KEY to .env
+# Add ANTHROPIC_API_KEY or OPENAI_API_KEY to .env
 
-# Run the zero-API-key demo first
+# No API key? Run the zero-cost demo first
 python demo/run_demo.py
 
-# Send a real prompt through the guard
+# Then send a real prompt
 cg check "What is the maximum file upload size?"
-
-# View violation report
 cg report
-```
-
-### Zero-API-key demo
-
-```bash
-python demo/run_demo.py
-```
-
-```
-──────────── ConsistencyGuard — Live Demo ────────────
-
-Simulating 7 LLM calls across two agents with injected inconsistencies...
-
-Call 1/7 · agent=support-agent · prompt='What is the maximum file upload size allowed?...'
-  ✓ consistent
-Call 2/7 · agent=support-agent · prompt='How do I reset my password?...'
-  ✓ consistent
-Call 3/7 · agent=sales-agent · prompt='What payment methods do you accept?...'
-  ✓ consistent
-Call 4/7 · agent=support-agent · prompt='What is the maximum file upload size allowed?...'
-  ⚠ VIOLATION DETECTED  severity=critical  divergence=0.51  similarity=1.00
-Call 5/7 · agent=support-agent · prompt='How do I reset my password?...'
-  ⚠ VIOLATION DETECTED  severity=warning   divergence=0.26  similarity=1.00
-Call 6/7 · agent=sales-agent · prompt='What payment methods do you accept?...'
-  ⚠ VIOLATION DETECTED  severity=warning   divergence=0.28  similarity=1.00
-Call 7/7 · agent=support-agent · prompt='What are your business hours?...'
-  ✓ consistent
-
-ConsistencyGuard — Last 3 Violations
-┌──────────┬───────────────┬──────────────────────────────┬─────────┬────────┐
-│ Severity │ Agent         │ Prompt (truncated)           │ Diverge │ Sim    │
-├──────────┼───────────────┼──────────────────────────────┼─────────┼────────┤
-│ WARNING  │ sales-agent   │ What payment methods do...   │ 0.28    │ 1.00   │
-│ WARNING  │ support-agent │ How do I reset my password?  │ 0.26    │ 1.00   │
-│ CRITICAL │ support-agent │ What is the maximum file...  │ 0.51    │ 1.00   │
-└──────────┴───────────────┴──────────────────────────────┴─────────┴────────┘
-
-┌──────────────────── ConsistencyGuard Summary ────────────────────┐
-│ Total LLM Calls:     7                                           │
-│ Total Violations:    3                                           │
-│ Critical:            1                                           │
-│ Warning:             2                                           │
-│ Info:                0                                           │
-│ Violation Rate:      42.9%                                       │
-└──────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Drop-in Integration
 
-```python
-# Before — direct API call
-import anthropic
-client = anthropic.Anthropic()
-response = client.messages.create(model="claude-haiku-4-5-20251001",
-                                   max_tokens=1024,
-                                   messages=[{"role": "user", "content": prompt}])
-text = response.content[0].text
+Replace your LLM call with `guarded_call`. Same response. Plus a list of violations.
 
-# After — one import, one function, same response
+```python
 from consistencyguard.proxy import guarded_call
 
-text, violations = guarded_call(prompt=prompt, agent_id="support-bot")
-if violations:
-    for v in violations:
-        print(f"[{v.severity.value}] {v.explanation}")
+response, violations = guarded_call(
+    prompt="What is the refund policy?",
+    agent_id="support-bot",
+)
+
+for v in violations:
+    print(f"[{v.severity.value.upper()}] {v.explanation}")
 ```
 
-### Async support
+That is the entire integration. `guarded_call` calls the LLM, embeds the prompt locally, scans past calls for semantic matches, computes response divergence, and returns any violations alongside the normal response text.
+
+### Async
 
 ```python
 from consistencyguard.proxy import aguarded_call
 
-text, violations = await aguarded_call(prompt=prompt, agent_id="support-bot")
+response, violations = await aguarded_call(
+    prompt="What is the refund policy?",
+    agent_id="support-bot",
+)
+```
+
+### Provider selection
+
+```python
+# Explicit provider — no env var needed
+response, violations = guarded_call(
+    prompt="What is the upload limit?",
+    agent_id="storage-agent",
+    provider="openai",   # "anthropic" | "openai" | "gemini"
+    model="gpt-4o-mini",
+)
 ```
 
 ---
 
-## CLI Commands
+## How It Works
+
+```
+Your App  →  guarded_call()  →  LLM API (Anthropic / OpenAI / Gemini)
+                 │
+                 ├─ 1. embed(prompt)          ← all-MiniLM-L6-v2, local CPU, no API cost
+                 ├─ 2. cosine similarity scan ← SQLite, O(n) over stored embeddings
+                 ├─ 3. if similarity ≥ 0.92   → compare responses semantically
+                 ├─ 4. if divergence ≥ 0.25   → CONSISTENCY VIOLATION
+                 └─ 5. log + optional webhook + return violations
+```
+
+| Severity | Divergence | What it means |
+|----------|------------|---------------|
+| `INFO`   | ≥ 0.10     | Minor phrasing variation |
+| `WARNING` | ≥ 0.25    | Material difference in content |
+| `CRITICAL` | ≥ 0.40  | Responses contradict each other |
+
+All detection runs locally. Embeddings are computed with `sentence-transformers` (`all-MiniLM-L6-v2`) on CPU. Calls and embeddings are stored in a single SQLite file. No data leaves your machine for the detection step.
+
+---
+
+## Hallucination Diff — `cg reliability`
+
+Run the same prompt N times and measure how consistent the model actually is. Produces a reliability score, per-run divergence, a pairwise matrix, and outlier detection.
 
 ```bash
-cg health                          # system status — DB, env, model
-cg report                          # recent violations
-cg report --severity critical      # filter by severity
-cg report --agent support-bot      # filter by agent
-cg report --since 24               # last 24 hours only
-cg trend --hours 48                # hourly violation bar chart
-cg agents                          # per-agent violation breakdown
-cg export --format csv -o out.csv  # export to CSV or JSON
-cg check "your prompt here"        # send a real prompt (needs API key)
+cg reliability "What is the refund policy?" --runs 5
 ```
+
+```
+╭─────────────────── Hallucination Diff Report ───────────────────╮
+│ Prompt:  What is the refund policy?                             │
+│ Model:   claude-haiku-4-5-20251001                              │
+│ Runs:    5                                                      │
+│                                                                 │
+│ Reliability Score:  0.94 / 1.00   RELIABLE                     │
+│ Verdict:            RELIABLE                                    │
+│                                                                 │
+│ Mean pairwise divergence:  0.0601                               │
+│ Max  pairwise divergence:  0.1134                               │
+│ Outlier runs (≥0.25 from median): 0 / 5                        │
+╰─────────────────────────────────────────────────────────────────╯
+
+Per-Run Results
+┌─────┬──────────────────┬──────────┬─────────┬─────────────────────────────────────────────────────────────┐
+│ Run │ Div. from Median │ Severity │ Outlier │ Response (truncated)                                        │
+├─────┼──────────────────┼──────────┼─────────┼─────────────────────────────────────────────────────────────┤
+│   1 │           0.0000 │ · INFO   │  median │ We offer a full refund within 30 days of purchase. After …  │
+│   2 │           0.0512 │ · INFO   │      no │ Our refund policy allows returns within 30 days. Items mu…  │
+│   3 │           0.0489 │ · INFO   │      no │ Refunds are available for 30 days from the date of purchas… │
+│   4 │           0.0601 │ · INFO   │      no │ You can request a refund within 30 days. Please contact s…  │
+│   5 │           0.0723 │ · INFO   │      no │ We have a 30-day return policy. Refunds are processed with… │
+└─────┴──────────────────┴──────────┴─────────┴─────────────────────────────────────────────────────────────┘
+
+────────────────────── Pairwise Divergence Matrix ──────────────────────
+      R01   R02   R03   R04   R05
+R01   ——  0.05  0.05  0.06  0.07
+R02  0.05   ——  0.03  0.08  0.11
+R03  0.05  0.03   ——  0.07  0.09
+R04  0.06  0.08  0.07   ——  0.06
+R05  0.07  0.11  0.09  0.06   ——
+```
+
+Use `--runs 10` for a more statistically robust score. Add `--outlier-threshold 0.20` to tighten the outlier boundary.
+
+```bash
+cg reliability "What is our cancellation fee?" --runs 10 --provider openai --model gpt-4o-mini
+```
+
+---
+
+## CLI Reference
+
+```bash
+# System status — DB path and size, env config, embedding model
+cg health
+
+# Recent violations
+cg report
+cg report --severity critical
+cg report --agent support-bot
+cg report --since 24          # last 24 hours
+
+# Hourly violation bar chart
+cg trend
+cg trend --hours 48
+
+# Per-agent violation breakdown
+cg agents
+cg agents --hours 72
+
+# Send a live prompt through the guard (requires API key)
+cg check "What is the maximum file upload size?"
+cg check "Refund policy?" --agent billing-bot --provider openai
+
+# Reliability test — run N times, score 0.0–1.0
+cg reliability "What is the refund policy?" --runs 10
+cg reliability "Cancellation fee?" --runs 5 --provider gemini --model gemini-1.5-flash
+
+# Export violations
+cg export --format json -o violations.json
+cg export --format csv --agent support-bot --since 48
+```
+
+---
+
+## Features
+
+| Feature | Detail |
+|---------|--------|
+| `guarded_call()` / `aguarded_call()` | Drop-in sync and async wrappers — same response, plus violations |
+| Local embeddings | `all-MiniLM-L6-v2` on CPU — no API cost, no data leaves the machine |
+| Three providers | Anthropic, OpenAI, Google Gemini — swap via `.env`, no code change |
+| OpenAI-compatible endpoints | Works with Groq, Together AI, and any OpenAI-compatible API |
+| Severity levels | `INFO` / `WARNING` / `CRITICAL` — tunable thresholds |
+| `cg reliability` | Run a prompt N times, get reliability score + pairwise matrix + outlier detection |
+| Time-windowed baselines | `COMPARISON_WINDOW_DAYS` prevents stale history from flagging correct updated answers |
+| Webhook alerts | POST violation JSON to any HTTP endpoint (Slack, PagerDuty, custom) on every detection |
+| Zero infrastructure | One SQLite file, zero ops, `pip install` and done |
+| 45 tests | Real embeddings, fully isolated DBs per test, no API key required |
+| Zero-API-key demo | `python demo/run_demo.py` — 7 calls, 3 injected violations, no credentials needed |
+
+---
+
+## Installation
+
+**Requirements:** Python 3.11+
+
+```bash
+pip install -e .
+```
+
+On first run, `sentence-transformers` downloads `all-MiniLM-L6-v2` (~90 MB) from Hugging Face and caches it locally. Subsequent runs load from cache instantly.
 
 ---
 
 ## Configuration
 
-All settings via environment variables (`.env` file):
+All settings are environment variables. Copy `.env.example` to `.env` and edit:
+
+```bash
+cp .env.example .env
+```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROVIDER` | `anthropic` | `anthropic` or `openai` |
-| `ANTHROPIC_API_KEY` | — | Required for Anthropic |
-| `OPENAI_API_KEY` | — | Required for OpenAI |
-| `MODEL` | `claude-haiku-4-5-20251001` | Model name (must match provider) |
-| `SIMILARITY_THRESHOLD` | `0.92` | Prompt similarity to trigger check |
-| `DIVERGENCE_THRESHOLD` | `0.25` | Response divergence to flag violation |
-| `COMPARISON_WINDOW_DAYS` | unlimited | Only compare against calls from last N days |
-| `DB_PATH` | `consistencyguard.db` | SQLite database path |
+| `PROVIDER` | `anthropic` | LLM provider: `anthropic`, `openai`, or `gemini` |
+| `ANTHROPIC_API_KEY` | — | Required when `PROVIDER=anthropic` |
+| `OPENAI_API_KEY` | — | Required when `PROVIDER=openai` or `PROVIDER=gemini` |
+| `GEMINI_API_KEY` | — | Required when `PROVIDER=gemini` |
+| `OPENAI_BASE_URL` | — | Override base URL for any OpenAI-compatible endpoint (Groq, Together, etc.) |
+| `MODEL` | `claude-haiku-4-5-20251001` | Model name — must match the provider |
+| `SIMILARITY_THRESHOLD` | `0.92` | Prompt cosine similarity required to trigger a comparison |
+| `DIVERGENCE_THRESHOLD` | `0.25` | Response divergence required to flag a violation |
+| `COMPARISON_WINDOW_DAYS` | unlimited | Only compare against calls from the last N days |
+| `DB_PATH` | `consistencyguard.db` | SQLite database file path |
 | `WEBHOOK_URL` | — | POST violation JSON here on every detection |
+| `RELIABILITY_RUN_DELAY` | `0` | Seconds between runs in `cg reliability` (useful for free-tier rate limits) |
 
 ### OpenAI example
 
@@ -217,80 +254,30 @@ OPENAI_API_KEY=sk-...
 MODEL=gpt-4o-mini
 ```
 
----
+### Gemini example
 
-## Architecture
-
-```
-consistencyguard/
-├── consistencyguard/
-│   ├── models.py      # Pydantic data models
-│   ├── embedder.py    # sentence-transformers (all-MiniLM-L6-v2), local
-│   ├── store.py       # SQLite — calls, violations, trend, agent stats
-│   ├── detector.py    # cosine similarity scan + divergence check
-│   ├── proxy.py       # guarded_call / aguarded_call — the main entry point
-│   ├── providers.py   # Anthropic + OpenAI provider abstraction
-│   ├── webhooks.py    # webhook alert dispatch (sync + async)
-│   ├── reporter.py    # Rich terminal tables — violations, trend, agents
-│   └── cli.py         # Click CLI (cg command)
-├── tests/
-│   ├── conftest.py         # isolated DB fixture (autouse)
-│   ├── test_detector.py    # embedding + detection tests (real embeddings)
-│   ├── test_store.py       # SQLite store tests
-│   └── test_providers.py   # provider abstraction tests (mocked)
-├── demo/
-│   └── run_demo.py    # zero-API-key demo
-├── docs/
-│   ├── SYSTEM_DESIGN.md      # architecture, data flow, scaling analysis
-│   └── FAILURE_ANALYSIS.md   # 8 real failure scenarios + RCA
-└── pyproject.toml
+```env
+PROVIDER=gemini
+GEMINI_API_KEY=...
+MODEL=gemini-1.5-flash
 ```
 
-**Key design decisions:**
+### Groq (free tier, fast)
 
-- **Local embeddings** — `all-MiniLM-L6-v2` runs on CPU. No embedding API calls, no data leaves the machine, no cost per prompt.
-- **SQLite over vector DB** — O(n) scan is fast enough to ~50k calls. Zero infrastructure. One file, zero ops.
-- **Provider abstraction** — `AnthropicProvider` and `OpenAIProvider` implement the same `complete`/`acomplete` interface. Swap providers in `.env`, no code change.
-- **Time-windowed comparison** — `COMPARISON_WINDOW_DAYS` prevents stale historical baselines from flagging correct updated answers.
-- **Prompt normalization** — whitespace collapsed, lowercased before embedding to prevent tokenization artifacts.
+```env
+PROVIDER=openai
+OPENAI_API_KEY=<your-groq-key>
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+MODEL=llama-3.1-8b-instant
+```
+
+Get a free Groq key at [console.groq.com](https://console.groq.com). Get a free Gemini key at [aistudio.google.com](https://aistudio.google.com).
 
 ---
 
-## Tests
+## Webhook Alerts
 
-```bash
-pip install -e ".[dev]"
-pytest tests/ -v
-```
-
-```
-tests/test_detector.py   ........   8 passed
-tests/test_providers.py  ..........  10 passed
-tests/test_store.py      ......      6 passed
-======================== 24 passed ========================
-```
-
-Tests use real embeddings (no mocking of sentence-transformers) and fully
-isolated SQLite databases per test via `conftest.py`.
-
----
-
-## Known Limitations
-
-| Limitation | Impact | Planned Fix |
-|-----------|--------|-------------|
-| No PII scrubbing | Prompts stored as plaintext | Pre-processing redaction hook |
-| SQLite single-writer | Bottleneck at high concurrency | pgvector / aiosqlite |
-| No multi-tenancy | All agents share one DB | `tenant_id` column + row filtering |
-| No streaming support | Buffers full response before checking | Async tail check |
-| No prompt template support | Variable values affect similarity | Template registry |
-| Embedding model drift | Re-embedding needed after model upgrade | Migration tooling |
-
----
-
-## Webhook Integration
-
-Set `WEBHOOK_URL` in `.env` to receive a JSON POST on every violation:
+Set `WEBHOOK_URL` in `.env` to receive a JSON POST on every violation. Works with any HTTP endpoint that accepts a JSON body — Slack incoming webhooks, PagerDuty, custom receivers.
 
 ```json
 {
@@ -303,29 +290,87 @@ Set `WEBHOOK_URL` in `.env` to receive a JSON POST on every violation:
   "prompt_similarity": 1.0,
   "response_divergence": 0.43,
   "explanation": "[CRITICAL] Semantic divergence: 0.43...",
-  "timestamp": "2026-05-16T15:30:00"
+  "timestamp": "2026-05-26T15:30:00"
 }
 ```
 
-Works with any HTTP endpoint that accepts a JSON POST — Slack incoming webhooks, alerting tools, and custom receivers.
+---
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+| Suite | Tests | What it covers |
+|-------|-------|----------------|
+| `test_detector.py` | 8 | Embedder cosine similarity, divergence scoring, severity classification — real embeddings |
+| `test_store.py` | 6 | SQLite schema, call persistence, violation storage, stats aggregation |
+| `test_providers.py` | 10 | Anthropic and OpenAI sync/async — all mocked, no API key required |
+| `test_user_flows.py` | 7 | End-to-end developer flows: first call, consistent follow-up, contradicting response, cross-agent detection |
+| `test_hallucination_diff.py` | 14 | Pairwise matrix, median detection, verdict classification, outlier flagging, report structure |
+| **Total** | **45** | All pass. No API key required for any test. |
+
+Tests use real `sentence-transformers` embeddings (no mocking of the model) and fully isolated SQLite databases per test via the `conftest.py` fixture.
+
+---
+
+## Architecture
+
+```
+consistencyguard/
+├── consistencyguard/
+│   ├── models.py             # Pydantic data models (LLMCall, ConsistencyViolation, etc.)
+│   ├── embedder.py           # all-MiniLM-L6-v2 embedding + cosine similarity
+│   ├── store.py              # SQLite — calls, embeddings, violations, trend, agent stats
+│   ├── detector.py           # Similarity scan + divergence check + severity classification
+│   ├── proxy.py              # guarded_call / aguarded_call — the main entry point
+│   ├── providers.py          # AnthropicProvider, OpenAIProvider, GeminiProvider
+│   ├── hallucination_diff.py # Reliability test, pairwise matrix, verdict, outlier detection
+│   ├── webhooks.py           # Webhook dispatch — sync (httpx) and async
+│   ├── reporter.py           # Rich terminal output — tables, trend chart, hallucination diff
+│   └── cli.py                # Click CLI (cg command)
+├── tests/                    # 45 tests
+├── demo/
+│   └── run_demo.py           # Zero-API-key demo — 7 calls, 3 injected violations
+├── docs/
+│   ├── SYSTEM_DESIGN.md      # Architecture, data flow, scaling analysis
+│   └── FAILURE_ANALYSIS.md   # 8 real failure scenarios with root cause analysis
+└── pyproject.toml
+```
+
+**Key design decisions:**
+
+- **Local embeddings** — `all-MiniLM-L6-v2` runs on CPU. No embedding API calls, no data leaves the machine, no cost per prompt.
+- **SQLite over a vector database** — O(n) cosine scan over stored embeddings is fast enough to ~50k calls. Zero infrastructure. One file, zero ops.
+- **Provider abstraction** — `AnthropicProvider`, `OpenAIProvider`, and `GeminiProvider` all implement the same `complete` / `acomplete` interface. Change providers by editing `.env`, not code.
+- **Time-windowed comparison** — `COMPARISON_WINDOW_DAYS` prevents stale historical baselines from flagging correct updated answers when your policy genuinely changes.
+- **Prompt normalization** — whitespace collapsed and lowercased before embedding to prevent tokenization artifacts from causing spurious misses.
+- **Cross-agent scope** — consistency is checked globally, not per-agent. If `agent-a` and `agent-b` give contradicting answers to the same question, that is a violation. See `test_user_flows.py::test_cross_agent_divergence_is_detected`.
+
+---
+
+## Known Limitations
+
+| Limitation | Impact | Status |
+|-----------|--------|--------|
+| No PII scrubbing | Prompts stored as plaintext in SQLite | Pre-processing redaction hook planned |
+| SQLite single-writer | Throughput bottleneck at high concurrency | `pgvector` / `aiosqlite` migration planned |
+| No prompt template support | Variable values shift prompt embeddings | Template registry planned |
+| No streaming support | Buffers full response before checking | Async tail-check planned |
+| Embedding model drift | Re-embedding required after model upgrade | Migration tooling planned |
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup,
-test instructions, and PR guidelines.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, test instructions, free-tier LLM options, and PR guidelines.
 
 ```bash
-pytest tests/ -v          # all 24 tests must pass
-python demo/run_demo.py   # demo must run clean
+pytest tests/ -v          # all 45 tests must pass
+python demo/run_demo.py   # demo must exit cleanly with 3 violations detected
 ```
-
----
-
-## Demo Output
-
-![ConsistencyGuard Demo](assets/demo.png)
 
 ---
 

@@ -59,12 +59,13 @@ class AnthropicProvider:
 
 
 class OpenAIProvider:
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         if not _OPENAI_AVAILABLE:
             raise ImportError("openai package required: pip install openai")
         key = api_key or os.getenv("OPENAI_API_KEY")
-        self.client = _openai_mod.OpenAI(api_key=key)
-        self.async_client = _openai_mod.AsyncOpenAI(api_key=key)
+        url = base_url or os.getenv("OPENAI_BASE_URL") or None
+        self.client = _openai_mod.OpenAI(api_key=key, base_url=url)
+        self.async_client = _openai_mod.AsyncOpenAI(api_key=key, base_url=url)
 
     @_retry()
     def complete(self, prompt: str, model: str, max_tokens: int) -> str:
@@ -91,10 +92,23 @@ class OpenAIProvider:
                 return response.choices[0].message.content
 
 
+class GeminiProvider(OpenAIProvider):
+    """
+    Google Gemini via its OpenAI-compatible endpoint.
+    Uses GEMINI_API_KEY env var (or api_key argument).
+    Model examples: gemini-2.0-flash, gemini-1.5-flash, gemini-1.5-pro
+    """
+    _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    def __init__(self, api_key: Optional[str] = None):
+        key = api_key or os.getenv("GEMINI_API_KEY")
+        super().__init__(api_key=key, base_url=self._GEMINI_BASE_URL)
+
+
 def get_provider(
     name: Optional[str] = None,
     api_key: Optional[str] = None,
-) -> "AnthropicProvider | OpenAIProvider":
+) -> "AnthropicProvider | OpenAIProvider | GeminiProvider":
     """
     Factory. Reads PROVIDER env var (default 'anthropic').
     Pass name to override the env var.
@@ -104,6 +118,8 @@ def get_provider(
         return AnthropicProvider(api_key=api_key)
     elif resolved == "openai":
         return OpenAIProvider(api_key=api_key)
+    elif resolved == "gemini":
+        return GeminiProvider(api_key=api_key)
     raise ValueError(
-        f"Unknown provider '{resolved}'. Supported: anthropic, openai"
+        f"Unknown provider '{resolved}'. Supported: anthropic, openai, gemini"
     )

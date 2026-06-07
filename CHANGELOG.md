@@ -4,6 +4,31 @@ All notable changes to ConsistencyGuard are documented here.
 
 ---
 
+## [1.0.2] — 2026-05-26
+
+### Added
+
+- `consistencyguard/hallucination_diff.py` — Hallucination Diff engine
+  - `run_reliability_test(prompt, runs)` — runs same prompt N times, computes pairwise divergence matrix
+  - `reliability_score` (0.0–1.0) — 1 − mean pairwise divergence across all run pairs
+  - Verdict classification: RELIABLE (≥0.90) | UNSTABLE (≥0.70) | CRITICAL (<0.70)
+  - Median response detection — identifies the most representative run
+  - Outlier flagging — runs with divergence from median ≥ threshold marked as outliers
+  - Async variant `arun_reliability_test()` — runs all N calls concurrently
+- `cg reliability` CLI command — `cg reliability "prompt" --runs 10 --provider gemini`
+- `GeminiProvider` — Google Gemini via OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai/`)
+- `OpenAIProvider` now accepts `base_url` for any OpenAI-compatible endpoint (Groq, Together, etc.)
+- `RELIABILITY_RUN_DELAY` env var — adds delay between runs to respect free-tier rate limits
+- `tests/test_hallucination_diff.py` — 14 tests covering pairwise matrix, median detection, verdict, outlier flagging, report structure
+
+### Fixed
+
+- Pairwise divergence matrix could show `-0.00` due to floating-point cosine similarity slightly exceeding 1.0 — clamped to `max(0.0, ...)`
+
+### Total test count: 45 (up from 31)
+
+---
+
 ## [1.0.1] — 2026-05-23
 
 ### Added

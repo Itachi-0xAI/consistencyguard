@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+from rich.rule import Rule
 
 from consistencyguard.store import (
     get_all_violations,
@@ -160,6 +161,82 @@ def print_agent_stats(hours: int = 24) -> None:
         )
 
     console.print(table)
+
+
+def print_hallucination_diff(report) -> None:
+    """Render a HallucinationDiffReport to the terminal."""
+    from consistencyguard.models import ViolationSeverity
+
+    VERDICT_COLOR = {
+        "RELIABLE": "bold green",
+        "UNSTABLE": "bold yellow",
+        "CRITICAL": "bold red",
+    }
+    SEV_SYMBOL = {
+        ViolationSeverity.INFO: ("·", "cyan"),
+        ViolationSeverity.WARNING: ("▲", "yellow"),
+        ViolationSeverity.CRITICAL: ("✖", "bold red"),
+    }
+
+    verdict_color = VERDICT_COLOR.get(report.verdict, "white")
+
+    # ── header panel ─────────────────────────────────────────────────────────
+    header = (
+        f"[bold]Prompt:[/bold]  {report.prompt[:100]}\n"
+        f"[bold]Model:[/bold]   {report.model}\n"
+        f"[bold]Runs:[/bold]    {report.runs}\n\n"
+        f"[bold]Reliability Score:[/bold]  [{verdict_color}]{report.reliability_score:.2f} / 1.00[/{verdict_color}]\n"
+        f"[bold]Verdict:[/bold]            [{verdict_color}]{report.verdict}[/{verdict_color}]\n\n"
+        f"[dim]Mean pairwise divergence:  {report.mean_pairwise_divergence:.4f}[/dim]\n"
+        f"[dim]Max  pairwise divergence:  {report.max_pairwise_divergence:.4f}[/dim]\n"
+        f"[dim]Outlier runs (≥{report.outlier_threshold:.2f} from median): {report.outlier_count} / {report.runs}[/dim]"
+    )
+    console.print(Panel(header, title="Hallucination Diff Report"))
+
+    # ── per-run table ─────────────────────────────────────────────────────────
+    table = Table(title="Per-Run Results", show_lines=True)
+    table.add_column("Run", width=5, justify="right")
+    table.add_column("Div. from Median", width=17, justify="right")
+    table.add_column("Severity", width=10)
+    table.add_column("Outlier", width=8, justify="center")
+    table.add_column("Response (truncated)", width=60)
+
+    for r in report.run_results:
+        sym, color = SEV_SYMBOL.get(r.severity, ("?", "white"))
+        is_median = r.response == report.median_response
+        table.add_row(
+            str(r.run_index),
+            f"[{color}]{r.divergence_from_median:.4f}[/{color}]",
+            f"[{color}]{sym} {r.severity.value.upper()}[/{color}]",
+            "[dim]median[/dim]" if is_median else ("[red]YES[/red]" if r.is_outlier else "[green]no[/green]"),
+            r.response[:120] + ("…" if len(r.response) > 120 else ""),
+        )
+
+    console.print(table)
+
+    # ── pairwise matrix ───────────────────────────────────────────────────────
+    if report.runs <= 10:
+        console.print(Rule("Pairwise Divergence Matrix"))
+        n = report.runs
+        header_row = "     " + "".join(f"  R{j+1:02d}" for j in range(n))
+        console.print(f"[dim]{header_row}[/dim]")
+        for i in range(n):
+            row_str = f"[dim]R{i+1:02d}[/dim] "
+            for j in range(n):
+                val = report.pairwise_matrix[i][j]
+                if i == j:
+                    row_str += " [dim] ——[/dim]"
+                elif val >= 0.40:
+                    row_str += f" [bold red]{val:.2f}[/bold red]"
+                elif val >= 0.25:
+                    row_str += f" [yellow]{val:.2f}[/yellow]"
+                else:
+                    row_str += f" [green]{val:.2f}[/green]"
+            console.print(row_str)
+
+    # ── median response ───────────────────────────────────────────────────────
+    console.print(Rule("Median Response (most representative)"))
+    console.print(Panel(report.median_response[:500], border_style="dim"))
 
 
 def export_violations(

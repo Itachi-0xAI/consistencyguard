@@ -20,7 +20,7 @@ cp .env.example .env
 pytest tests/ -v
 ```
 
-All 31 tests must pass before opening a PR. Tests use real sentence-transformer
+All 45 tests must pass before opening a PR. Tests use real sentence-transformer
 embeddings (no mocking) and fully isolated SQLite databases per test via
 `conftest.py` — no API key required.
 
@@ -32,6 +32,7 @@ embeddings (no mocking) and fully isolated SQLite databases per test via
 | `test_store.py` | 6 | SQLite schema, save/load calls, violation persistence, stats aggregation |
 | `test_providers.py` | 10 | Anthropic + OpenAI sync/async — all mocked, no API keys needed |
 | `test_user_flows.py` | 7 | End-to-end developer flows: first call, consistency, violations, cross-agent behaviour |
+| `test_hallucination_diff.py` | 14 | Pairwise divergence matrix, median detection, verdict classification, outlier flagging, report structure |
 
 ### Important: global consistency scope
 
@@ -40,6 +41,36 @@ database, across all agents. A contradicting response from `agent-b` on a
 prompt already answered by `agent-a` **will** trigger a violation. This is
 by design — cross-agent inconsistency matters in production. See
 `test_user_flows.py::test_cross_agent_divergence_is_detected`.
+
+### Testing with a free LLM API (Groq / Gemini)
+
+The `cg reliability` command requires a real LLM provider. Free options:
+
+**Groq** (recommended — fast, generous free tier):
+```bash
+# .env
+PROVIDER=openai
+OPENAI_API_KEY=<your-groq-key>
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+MODEL=llama-3.1-8b-instant
+```
+Get a free key at https://console.groq.com
+
+**Google Gemini** (free tier with per-minute quota):
+```bash
+# .env
+PROVIDER=gemini
+GEMINI_API_KEY=<your-gemini-key>
+MODEL=gemini-1.5-flash
+```
+Get a free key at https://aistudio.google.com
+
+If you hit rate limits on free tiers, add a delay between runs:
+```bash
+$env:RELIABILITY_RUN_DELAY=3   # seconds between each of the N runs
+```
+
+---
 
 ## Running the Demo
 
@@ -55,15 +86,16 @@ No API key required.
 ```
 consistencyguard/
 ├── consistencyguard/
-│   ├── models.py      # Pydantic data models — start here
-│   ├── embedder.py    # Local sentence-transformer embedding
-│   ├── store.py       # SQLite persistence layer
-│   ├── detector.py    # Cosine similarity + divergence logic
-│   ├── proxy.py       # guarded_call / aguarded_call entry points
-│   ├── providers.py   # Anthropic + OpenAI provider abstraction
-│   ├── webhooks.py    # Webhook alert dispatch
-│   ├── reporter.py    # Rich terminal output
-│   └── cli.py         # Click CLI (cg command)
+│   ├── models.py              # Pydantic data models — start here
+│   ├── embedder.py            # Local sentence-transformer embedding
+│   ├── store.py               # SQLite persistence layer
+│   ├── detector.py            # Cosine similarity + divergence logic
+│   ├── proxy.py               # guarded_call / aguarded_call entry points
+│   ├── providers.py           # Anthropic, OpenAI, Gemini provider abstraction
+│   ├── hallucination_diff.py  # reliability test, pairwise matrix, verdict
+│   ├── webhooks.py            # Webhook alert dispatch
+│   ├── reporter.py            # Rich terminal output (incl. hallucination diff report)
+│   └── cli.py                 # Click CLI (cg command, incl. cg reliability)
 ├── tests/
 ├── demo/
 └── docs/
