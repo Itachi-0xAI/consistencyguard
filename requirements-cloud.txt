@@ -1,0 +1,11 @@
+# Streamlit Community Cloud deployment
+# sentence-transformers pulls torch (~2GB) — included but cached by Streamlit
+streamlit>=1.35.0
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+pydantic>=2.0.0
+click>=8.1.0
+rich>=13.0.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+pandas>=2.0.0

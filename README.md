@@ -24,6 +24,15 @@ Most LLM observability tools track cost, latency, and errors. None of them answe
 
 ---
 
+## Who Is This For
+
+- ML/AI engineers shipping LLM agents to production who need consistency guarantees
+- Platform teams running multi-agent systems across departments and need unified visibility
+- Support/knowledge bot owners who need to catch when the same question gets contradicting answers
+- RAG pipeline owners who need to catch when the retrieval index drifts and starts returning contradictory answers to the same question
+
+---
+
 ## Quickstart
 
 ```bash
