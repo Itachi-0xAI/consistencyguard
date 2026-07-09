@@ -16,6 +16,7 @@
 - **Streaming response support**: Handle streaming calls without buffering entire response
 - **Prompt template registry**: Store and version prompts used in calls for better context
 - **PII scrubbing hook**: Optional pre-logging filter to strip sensitive data
+- **Positioning intelligence layer**: A per-persona positioning playbook (CFO, engineer, compliance, etc.) wired to `guarded_call` as the baseline source — drift detection becomes brand-governance enforcement. Pairs with [CoAgent](https://github.com/Itachi-0xAI/coagent) DEBATE for arbitrating playbook updates. Open an issue if this is the use case you'd build on first.
 
 ## Phase 3: Enterprise (future)
 

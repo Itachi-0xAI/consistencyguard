@@ -14,6 +14,7 @@ from consistencyguard.reporter import (
     print_agent_stats,
     export_violations,
     print_hallucination_diff,
+    export_violations_html,
 )
 
 load_dotenv()
@@ -58,7 +59,7 @@ def agents(hours):
 @cli.command()
 @click.option(
     "--format", "fmt",
-    type=click.Choice(["json", "csv"], case_sensitive=False),
+    type=click.Choice(["json", "csv", "html", "markdown"], case_sensitive=False),
     default="json",
     help="Output format",
 )
@@ -83,12 +84,74 @@ def export(fmt, output, agent, severity, since):
 
 
 @cli.command()
+@click.argument("prompt")
+@click.option(
+    "--providers", "-p",
+    default="groq,gemini",
+    show_default=True,
+    help="Comma-separated provider list (e.g. groq,gemini)",
+)
+@click.option("--drift-threshold", default=0.25, show_default=True,
+              help="Pairwise divergence above which DRIFT is declared")
+def crosscheck(prompt, providers, drift_threshold):
+    """
+    Run PROMPT on multiple free providers in parallel and compare responses.
+
+    Example:
+
+        cg crosscheck "What is the capital of France?" --providers groq,gemini
+    """
+    from consistencyguard.cross_check import cross_provider_check
+    from rich.table import Table
+
+    provider_list = [p.strip() for p in providers.split(",") if p.strip()]
+    console.print(f"[dim]Running prompt on {provider_list}…[/dim]\n")
+
+    try:
+        report = cross_provider_check(
+            prompt=prompt,
+            providers=provider_list,
+            drift_threshold=drift_threshold,
+        )
+    except Exception as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise SystemExit(1)
+
+    verdict_color = "green" if report.verdict == "AGREEMENT" else "bold red"
+
+    # Provider responses table
+    resp_table = Table(title="Provider Responses", show_lines=True)
+    resp_table.add_column("Provider", width=14)
+    resp_table.add_column("Response", width=80)
+    for prov, text in report.provider_responses.items():
+        resp_table.add_row(prov, text[:300] + ("…" if len(text) > 300 else ""))
+    console.print(resp_table)
+
+    # Pairwise divergence table
+    div_table = Table(title="Pairwise Divergence", show_lines=False)
+    div_table.add_column("Pair", width=24)
+    div_table.add_column("Divergence", justify="right", width=12)
+    div_table.add_column("Status", width=14)
+    for pair, div in report.pairwise_divergence.items():
+        status = "[red]DRIFT[/red]" if div > drift_threshold else "[green]OK[/green]"
+        div_table.add_row(pair, f"{div:.4f}", status)
+    console.print(div_table)
+
+    console.print(
+        f"\n[bold]Agreement Score:[/bold] {report.agreement_score:.4f}  "
+        f"[bold]Verdict:[/bold] [{verdict_color}]{report.verdict}[/{verdict_color}]\n"
+    )
+
+
+@cli.command()
 def health():
-    """Show system health: DB stats, env config, model status."""
+    """Show system health: DB stats, env config, model status. Exit 0=healthy, 1=unhealthy."""
     table = Table(title="ConsistencyGuard Health", show_lines=True)
     table.add_column("Check", width=28)
     table.add_column("Status", width=12)
     table.add_column("Detail", width=40)
+
+    failures = []
 
     # DB file
     db_path = get_db_path()
@@ -99,6 +162,16 @@ def health():
         "[green]OK[/green]" if db_exists else "[yellow]NEW[/yellow]",
         f"{db_path}  ({db_size})",
     )
+
+    # DB writable check
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS _health_probe (id INTEGER)")
+            conn.execute("DELETE FROM _health_probe")
+        table.add_row("DB writable", "[green]OK[/green]", "write test passed")
+    except Exception as e:
+        table.add_row("DB writable", "[red]FAIL[/red]", str(e))
+        failures.append("db_writable")
 
     # Table counts
     try:
@@ -122,24 +195,90 @@ def health():
         val = os.getenv(var, default)
         table.add_row(var, "[dim]env[/dim]", val)
 
-    # API key presence
-    for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    # API key presence + reachability
+    _PROVIDER_URLS = {
+        "ANTHROPIC_API_KEY": "https://api.anthropic.com",
+        "OPENAI_API_KEY": "https://api.openai.com",
+        "GEMINI_API_KEY": "https://generativelanguage.googleapis.com",
+    }
+    any_key_set = False
+    for key, base_url in _PROVIDER_URLS.items():
         present = bool(os.getenv(key))
-        table.add_row(
-            key,
-            "[green]set[/green]" if present else "[dim]not set[/dim]",
-            "***" if present else "—",
-        )
+        if present:
+            any_key_set = True
+            # HEAD reachability check with 2s timeout
+            try:
+                import httpx
+                with httpx.Client(timeout=2.0) as client:
+                    client.head(base_url)
+                table.add_row(key, "[green]set + reachable[/green]", "***")
+            except Exception as exc:
+                table.add_row(key, "[yellow]set, unreachable[/yellow]", str(exc)[:38])
+                failures.append(f"{key}_unreachable")
+        else:
+            table.add_row(key, "[dim]not set[/dim]", "—")
+
+    if not any_key_set:
+        failures.append("no_api_key")
 
     # Embedding model
     try:
         from consistencyguard.embedder import get_model
-        m = get_model()
+        get_model()
         table.add_row("Embedding model", "[green]loaded[/green]", "all-MiniLM-L6-v2")
     except Exception as e:
         table.add_row("Embedding model", "[red]ERROR[/red]", str(e))
+        failures.append("embedding_model")
 
     console.print(table)
+
+    if failures:
+        console.print(f"[red]Unhealthy — failed checks: {', '.join(failures)}[/red]")
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.option("--label", default="", help="Human-readable label for this baseline snapshot")
+def pin(label):
+    """Pin current DB snapshot to a secret GitHub Gist. Requires GITHUB_TOKEN env var."""
+    from consistencyguard.baseline import pin_baseline
+    try:
+        gist_id = pin_baseline(label=label)
+        console.print(f"[green]Baseline pinned.[/green] Gist ID: {gist_id}")
+        console.print(f"[dim]https://gist.github.com/{gist_id}[/dim]")
+    except EnvironmentError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print("[dim]Set GITHUB_TOKEN=<your PAT with 'gist' scope> and retry.[/dim]")
+        raise SystemExit(1)
+    except Exception as exc:
+        console.print(f"[red]Error pinning baseline: {exc}[/red]")
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("gist_id")
+def restore(gist_id):
+    """Fetch a pinned baseline snapshot from GitHub Gist and print its summary."""
+    from consistencyguard.baseline import restore_baseline
+    try:
+        snapshot = restore_baseline(gist_id=gist_id)
+        label = snapshot.get("label", "(no label)")
+        pinned_at = snapshot.get("pinned_at", "unknown")
+        agents = snapshot.get("agents", {})
+        thresholds = snapshot.get("thresholds", {})
+        console.print(f"[bold]Baseline snapshot:[/bold] {label}")
+        console.print(f"[dim]Pinned at: {pinned_at}[/dim]")
+        console.print(f"Agents in snapshot: {len(agents)}")
+        for aid in agents:
+            console.print(f"  [cyan]{aid}[/cyan]")
+        console.print(f"Thresholds: {thresholds}")
+    except EnvironmentError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print("[dim]Set GITHUB_TOKEN=<your PAT with 'gist' scope> and retry.[/dim]")
+        raise SystemExit(1)
+    except Exception as exc:
+        console.print(f"[red]Error restoring baseline: {exc}[/red]")
+        raise SystemExit(1)
 
 
 @cli.command()

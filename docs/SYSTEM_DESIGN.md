@@ -452,6 +452,103 @@ ConsistencyGuard uses **global** consistency scope: `check_consistency()` scans 
 
 ---
 
+## Production Deployment (Free APIs)
+
+### LLM — Groq (free real-time inference)
+
+Groq's free tier provides fast inference on Llama and Mixtral models with no credit card required.
+
+```env
+PROVIDER=openai
+OPENAI_API_KEY=<groq-api-key>        # from console.groq.com
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+MODEL=llama-3.1-8b-instant
+RELIABILITY_RUN_DELAY=3              # seconds between runs — respects Groq free-tier RPM quota
+```
+
+Alternatively, use Gemini free tier (aistudio.google.com):
+
+```env
+PROVIDER=gemini
+GEMINI_API_KEY=<gemini-api-key>
+MODEL=gemini-1.5-flash
+RELIABILITY_RUN_DELAY=4
+```
+
+### Dashboard — Streamlit Community Cloud (free)
+
+`app.py` is a Streamlit dashboard. Deploy for free:
+
+1. Push the repo to GitHub.
+2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo.
+3. Set `PROVIDER`, `OPENAI_API_KEY` (or `GEMINI_API_KEY`), and `WEBHOOK_URL` in the Streamlit Secrets panel.
+4. Streamlit handles HTTPS, scaling, and restarts — zero ops.
+
+Note: the SQLite file is ephemeral on Streamlit Cloud (resets on redeploy). For persistent storage, set `DB_PATH` to a mounted volume or switch to a hosted SQLite service.
+
+### Webhook — Slack (free)
+
+Create a Slack incoming webhook at `api.slack.com/messaging/webhooks` (free for any workspace).
+
+```env
+WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+```
+
+Every CRITICAL or WARNING violation POSTs a JSON payload to Slack. No paid plan required.
+
+### SQLite WAL mode for concurrent reads
+
+If you run multiple workers (e.g., gunicorn with 2+ workers), enable WAL mode to allow concurrent readers without blocking writers:
+
+```python
+import sqlite3
+with sqlite3.connect("consistencyguard.db") as conn:
+    conn.execute("PRAGMA journal_mode=WAL")
+```
+
+Add this to your startup script or `init_db()` call. WAL mode is safe to enable on an existing database with no data migration required.
+
+### CI / Docker health check
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD cg health
+```
+
+`cg health` exits 0 when the DB is writable, the embedding model is loaded, and at least one provider API key is set and reachable. Exit 1 signals unhealthy to Docker / Kubernetes.
+
+### GitHub Actions CI gate
+
+Use `cg health` and `cg reliability` as PR quality gates — exit 1 fails the build automatically:
+
+```yaml
+# .github/workflows/llm-consistency.yml
+name: LLM Consistency Gate
+on: [pull_request]
+
+jobs:
+  consistency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: Health gate
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: cg health          # exit 1 = unhealthy, fails PR
+      - name: Reliability gate
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          cg reliability "What is the refund policy?" \
+            --provider groq --runs 5   # exit 1 if CRITICAL drift
+```
+
+---
+
 ## Known Limitations and Roadmap
 
 | Limitation | Impact | Planned Fix |
@@ -461,4 +558,4 @@ ConsistencyGuard uses **global** consistency scope: `check_consistency()` scans 
 | No multi-tenancy | All agents share one DB | `tenant_id` column + row filtering |
 | No streaming support | Buffers full response before checking | Async tail check |
 | No prompt template support | Variable values affect similarity | Template registry |
-| Embedding model drift | Re-embedding needed after model upgrade | Migration tooling |
+| Embedding model drift | Re-embedding needed after model upgrade | addressed via `cg pin` / `cg restore` (Gist-backed) |

@@ -16,13 +16,28 @@ except ImportError:
     _openai_mod = None  # type: ignore[assignment]
     _OPENAI_AVAILABLE = False
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    """Return True for HTTP 429 / rate-limit errors from any provider SDK."""
+    msg = str(exc).lower()
+    return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many requests" in msg
 
 
 def _retry():
     return retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=8),
+        reraise=True,
+    )
+
+
+def _retry_with_429():
+    """Retry on any error (including 429s) with exponential backoff."""
+    return retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=16),
         reraise=True,
     )
 
@@ -67,7 +82,7 @@ class OpenAIProvider:
         self.client = _openai_mod.OpenAI(api_key=key, base_url=url)
         self.async_client = _openai_mod.AsyncOpenAI(api_key=key, base_url=url)
 
-    @_retry()
+    @_retry_with_429()
     def complete(self, prompt: str, model: str, max_tokens: int) -> str:
         response = self.client.chat.completions.create(
             model=model,
@@ -80,7 +95,7 @@ class OpenAIProvider:
         from tenacity import AsyncRetrying
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=2, max=8),
+            wait=wait_exponential(multiplier=2, min=2, max=16),
             reraise=True,
         ):
             with attempt:

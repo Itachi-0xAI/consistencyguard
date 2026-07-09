@@ -239,6 +239,159 @@ def print_hallucination_diff(report) -> None:
     console.print(Panel(report.median_response[:500], border_style="dim"))
 
 
+_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ConsistencyGuard — Violation Report</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0f1117; color: #e2e8f0; margin: 0; padding: 24px; }}
+  h1 {{ color: #f8fafc; font-size: 1.6rem; margin-bottom: 4px; }}
+  .subtitle {{ color: #64748b; font-size: 0.9rem; margin-bottom: 24px; }}
+  table {{ width: 100%; border-collapse: collapse; background: #1e2330;
+           border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.4); }}
+  th {{ background: #273042; color: #94a3b8; font-size: 0.75rem; text-transform: uppercase;
+        letter-spacing: .05em; padding: 10px 14px; text-align: left; }}
+  td {{ padding: 10px 14px; border-top: 1px solid #273042; font-size: 0.85rem;
+        vertical-align: top; word-break: break-word; max-width: 300px; }}
+  tr:hover td {{ background: #273042; }}
+  .sev-critical {{ color: #f87171; font-weight: 700; }}
+  .sev-warning  {{ color: #fbbf24; font-weight: 700; }}
+  .sev-info     {{ color: #38bdf8; font-weight: 700; }}
+  .num {{ font-variant-numeric: tabular-nums; text-align: right; }}
+  .footer {{ margin-top: 16px; color: #475569; font-size: 0.78rem; }}
+</style>
+</head>
+<body>
+<h1>ConsistencyGuard — Violation Report</h1>
+<p class="subtitle">Generated {generated_at} &bull; {count} violation(s)</p>
+<table>
+  <thead>
+    <tr>
+      <th>Severity</th><th>Agent</th><th>Prompt</th>
+      <th>Divergence</th><th>Similarity</th><th>Timestamp</th><th>Explanation</th>
+    </tr>
+  </thead>
+  <tbody>
+{rows}
+  </tbody>
+</table>
+<p class="footer">ConsistencyGuard &mdash; LLM output consistency monitor</p>
+</body>
+</html>"""
+
+
+def export_violations_html(
+    violations: Optional[list] = None,
+    agent_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    since_hours: Optional[int] = None,
+    limit: int = 10_000,
+) -> str:
+    """
+    Return a standalone HTML string for the given violations list.
+    If *violations* is None the store is queried with the filter kwargs.
+    """
+    import html as _html
+    from datetime import datetime, timezone
+
+    if violations is None:
+        rows_data = get_violations_filtered(
+            agent_id=agent_id, severity=severity, since_hours=since_hours, limit=limit
+        )
+    else:
+        rows_data = violations
+
+    def _sev_class(s: str) -> str:
+        return {"critical": "sev-critical", "warning": "sev-warning", "info": "sev-info"}.get(
+            str(s).lower(), ""
+        )
+
+    html_rows: list[str] = []
+    for v in rows_data:
+        sev = str(v.get("severity", "")).lower() if isinstance(v, dict) else str(getattr(v, "severity", "")).lower()
+        agent = _html.escape(str(v.get("agent_id", "") if isinstance(v, dict) else getattr(v, "agent_id", "")))
+        prompt_raw = v.get("new_prompt", "") if isinstance(v, dict) else getattr(v, "new_prompt", "")
+        prompt = _html.escape(str(prompt_raw)[:120])
+        div_val = v.get("response_divergence", 0) if isinstance(v, dict) else getattr(v, "response_divergence", 0)
+        sim_val = v.get("prompt_similarity", 0) if isinstance(v, dict) else getattr(v, "prompt_similarity", 0)
+        ts = str(v.get("timestamp", "") if isinstance(v, dict) else getattr(v, "timestamp", ""))[:19]
+        expl_raw = v.get("explanation", "") if isinstance(v, dict) else getattr(v, "explanation", "")
+        expl = _html.escape(str(expl_raw)[:200])
+
+        html_rows.append(
+            f'    <tr>'
+            f'<td class="{_sev_class(sev)}">{_html.escape(sev.upper())}</td>'
+            f'<td>{agent}</td>'
+            f'<td>{prompt}{"…" if len(str(prompt_raw)) > 120 else ""}</td>'
+            f'<td class="num">{float(div_val):.3f}</td>'
+            f'<td class="num">{float(sim_val):.3f}</td>'
+            f'<td>{_html.escape(ts)}</td>'
+            f'<td>{expl}</td>'
+            f'</tr>'
+        )
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return _HTML_TEMPLATE.format(
+        generated_at=now,
+        count=len(rows_data),
+        rows="\n".join(html_rows) if html_rows else '    <tr><td colspan="7" style="text-align:center;color:#64748b">No violations found.</td></tr>',
+    )
+
+
+_SEV_EMOJI = {
+    "critical": "🔴",
+    "warning": "🟡",
+    "info": "🔵",
+}
+
+
+def export_violations_markdown(rows: list[dict]) -> str:
+    """
+    Return a GitHub-pasteable Markdown table for the given violation rows.
+    Columns: Severity | Agent | Prompt (truncated 60ch) | Divergence | Timestamp
+    Includes a summary header line with totals.
+    """
+    from datetime import datetime, timezone
+
+    counts = {"critical": 0, "warning": 0, "info": 0}
+    for v in rows:
+        sev = str(v.get("severity", "")).lower()
+        if sev in counts:
+            counts[sev] += 1
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    summary = (
+        f"**ConsistencyGuard Violation Report** — {now} — "
+        f"{len(rows)} violation(s): "
+        f"🔴 {counts['critical']} critical / "
+        f"🟡 {counts['warning']} warning / "
+        f"🔵 {counts['info']} info"
+    )
+
+    header = "| Severity | Agent | Prompt | Divergence | Timestamp |"
+    separator = "| --- | --- | --- | --- | --- |"
+
+    table_rows: list[str] = []
+    for v in rows:
+        sev = str(v.get("severity", "")).lower()
+        emoji = _SEV_EMOJI.get(sev, "⚪")
+        agent = str(v.get("agent_id", ""))
+        prompt_raw = str(v.get("new_prompt", ""))
+        prompt_trunc = prompt_raw[:60] + ("…" if len(prompt_raw) > 60 else "")
+        div_val = v.get("response_divergence", 0)
+        ts = str(v.get("timestamp", ""))[:19]
+        table_rows.append(
+            f"| {emoji} {sev.upper()} | {agent} | {prompt_trunc} | {float(div_val):.3f} | {ts} |"
+        )
+
+    parts = [summary, "", header, separator] + table_rows
+    return "\n".join(parts)
+
+
 def export_violations(
     format: str = "json",
     agent_id: Optional[str] = None,
@@ -247,7 +400,7 @@ def export_violations(
     limit: int = 10_000,
 ) -> str:
     """
-    Return violations serialized as JSON or CSV string.
+    Return violations serialized as JSON, CSV, HTML, or Markdown string.
     Does not write to disk — caller handles output/file writing.
     """
     rows = get_violations_filtered(
@@ -256,6 +409,14 @@ def export_violations(
 
     if format == "json":
         return json.dumps(rows, indent=2, default=str)
+
+    if format == "html":
+        return export_violations_html(
+            violations=rows,
+        )
+
+    if format == "markdown":
+        return export_violations_markdown(rows)
 
     # CSV
     buf = io.StringIO()

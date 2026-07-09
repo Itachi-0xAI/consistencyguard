@@ -14,6 +14,19 @@ Real-time consistency monitor for LLM outputs. Wraps any LLM call with one funct
 
 ---
 
+## Complementary Features
+
+- **Cross-provider check** — `cg crosscheck "<prompt>"` runs the same prompt on Groq + Gemini in parallel and reports pairwise semantic divergence, catching when one provider hallucinates while others stay grounded.
+- **HTML export** — `cg export --format html` produces a standalone, browser-viewable report with embedded CSS. Share it without any viewer dependency.
+- **Discord webhooks** — set `WEBHOOK_URL` to a Discord webhook URL (`discord.com/api/webhooks/...`) and violation alerts arrive as rich embeds automatically; generic webhooks are unchanged.
+- **GitHub Actions CI gate** — use `cg health` and `cg reliability` as PR steps; exit 1 fails the build on drift (see `docs/SYSTEM_DESIGN.md`).
+- **Markdown export** — `cg export --format markdown` produces a GitHub-pasteable Markdown table (severity emoji, truncated prompt, divergence score) ready to drop into a PR comment.
+- **Baseline pinning** — `cg pin --label "v1.0-known-good"` snapshots agent embeddings + thresholds to a secret GitHub Gist (free PAT, `gist` scope); `cg restore <gist_id>` fetches and summarises the snapshot without mutating the local DB.
+- **Structured outputs** — pass `expected_schema={"key": type}` to `guarded_call`/`aguarded_call`; responses are JSON-validated, key-order-normalised before embedding, and violations carry `INVALID_JSON` or `SCHEMA_MISMATCH` issues. Stdlib `json` only.
+- **OpenTelemetry tracing** — install `opentelemetry-api` and configure a tracer; `guarded_call`, `aguarded_call`, and `find_similar_calls` emit spans with attributes like `cg.violations_count` and `cg.max_divergence`. Zero cost when OTel is absent.
+
+---
+
 ## The Problem
 
 Hallucinations are detectable — the model makes something up and it is obviously wrong. **Inconsistency is invisible.**
@@ -26,10 +39,103 @@ Most LLM observability tools track cost, latency, and errors. None of them answe
 
 ## Who Is This For
 
+- **Marketing and content teams** using AI to generate content who need brand consistency across personas, campaigns, and channels — without manually reviewing every output
 - ML/AI engineers shipping LLM agents to production who need consistency guarantees
 - Platform teams running multi-agent systems across departments and need unified visibility
-- Support/knowledge bot owners who need to catch when the same question gets contradicting answers
-- RAG pipeline owners who need to catch when the retrieval index drifts and starts returning contradictory answers to the same question
+- Support/knowledge bot owners who need to catch contradicting answers to the same question
+- RAG pipeline owners monitoring retrieval index drift
+
+---
+
+## Brand Positioning Consistency
+
+Marketing teams use AI to generate content (blog posts, emails, LinkedIn posts, ad copy). The AI doesn't know your positioning playbook — who you're talking to, what you emphasize for a CFO vs. an engineer, what competitors you mention or avoid.
+
+ConsistencyGuard solves this as a **brand governance layer**:
+
+1. Your first approved output for each persona becomes the baseline
+2. Every subsequent generation is checked against it semantically
+3. Drift from the approved positioning fires a violation before it reaches the approval queue
+
+```python
+# First approved output sets the baseline automatically
+response, violations = guarded_call(
+    prompt="Write a LinkedIn post for a CFO about our risk management product",
+    agent_id="marketing-cfo-persona",
+)
+
+# Next week, same persona — drift detected if messaging changed materially
+response, violations = guarded_call(
+    prompt="LinkedIn post for a CFO, risk management angle",
+    agent_id="marketing-cfo-persona",
+)
+
+for v in violations:
+    print(f"[{v.severity.value.upper()}] Brand drift detected: {v.explanation}")
+
+# [WARNING] Semantic divergence 0.31: Prior post emphasized compliance risk
+# reduction. New post emphasizes cost savings. Possible persona inconsistency.
+```
+
+Works for: marketing content, support bot responses, sales email sequences, product documentation, any AI output that must stay consistent with an approved baseline.
+
+---
+
+## The Demo That Sells Itself
+
+```bash
+python demo/run_demo.py
+```
+
+Watch what happens when the same question gets different answers:
+
+```
+Call 1 — Monday:
+  Q: "What is our refund policy?"
+  A: "Full refund within 30 days of purchase."
+  → Stored as baseline. No violations.
+
+Call 2 — Wednesday (same question):
+  Q: "What is our refund policy?"
+  A: "Refunds available within 30 days. Contact support."
+  → Divergence: 0.08. Severity: INFO. Minor phrasing variation.
+
+Call 3 — Friday (policy quietly changed in the model):
+  Q: "What is our refund policy?"
+  A: "No refunds after purchase under any circumstances."
+  → Divergence: 0.43. Severity: CRITICAL.
+  → [CRITICAL] Responses contradict each other. Prior: full refund. Now: no refund.
+  → Webhook fired. Slack alert sent.
+```
+
+Zero API key required. This runs on local embeddings and injected demo data.
+
+---
+
+## Test Your Model's Reliability
+
+```bash
+cg reliability "What is the refund policy?" --runs 5
+```
+
+This runs the same prompt 5 times and shows you how consistent the model actually is:
+
+```
+╭──────────────── Hallucination Diff Report ────────────────╮
+│ Reliability Score:  0.94 / 1.00   ✓ RELIABLE              │
+│ Mean pairwise divergence:  0.06                           │
+│ Outlier runs (≥0.25 from median): 0 / 5                   │
+╰───────────────────────────────────────────────────────────╯
+
+       R01    R02    R03    R04    R05
+R01    ——    0.05   0.05   0.06   0.07
+R02   0.05    ——    0.03   0.08   0.11
+R03   0.05   0.03    ——    0.07   0.09
+R04   0.06   0.08   0.07    ——    0.04
+R05   0.07   0.11   0.09   0.04    ——
+```
+
+Score below 0.85? Your model is inconsistent. Find out before your users do.
 
 ---
 
@@ -360,6 +466,41 @@ consistencyguard/
 
 ---
 
+## Integration: CoAgent Debate Engine
+
+When [CoAgent](https://github.com/Itachi-0xAI/coagent)'s DEBATE mode runs — two AI agents arguing opposing positions — each agent's claims are wrapped with `guarded_call()`. If an advocate cites something that contradicts a prior session's claim, it's flagged in the DecisionRecord's integrity report before the human moderator sees it.
+
+```python
+# Inside CoAgent's DebateOrchestrator, each claim is guarded:
+from consistencyguard.proxy import guarded_call
+
+response, violations = guarded_call(
+    prompt=claim_text,
+    agent_id=f"debate-{agent.name}-{session.id}",
+)
+if violations:
+    claim.flags.append("consistency_violation")
+    claim.confidence = "low"
+```
+
+Result: A debate where one advocate said *"PostgreSQL handles 10k writes/sec"* in session 1 but says *"PostgreSQL handles 50k writes/sec"* in session 2 is automatically flagged — before it influences the human's final decision.
+
+See [STACK.md](STACK.md) for the full three-tool integration pattern.
+
+---
+
+## Production Setup
+
+Deploy with free APIs in five steps:
+
+1. Get a free Groq key at [console.groq.com](https://console.groq.com) and set `PROVIDER=openai`, `OPENAI_API_KEY=<groq-key>`, `OPENAI_BASE_URL=https://api.groq.com/openai/v1`, `MODEL=llama-3.1-8b-instant` in `.env`.
+2. Set `RELIABILITY_RUN_DELAY=3` to respect Groq's free-tier requests-per-minute quota.
+3. Create a free Slack incoming webhook at `api.slack.com/messaging/webhooks` and set `WEBHOOK_URL` — violations POST there automatically with 3-retry backoff.
+4. Deploy `app.py` to [Streamlit Community Cloud](https://share.streamlit.io) (free) — connect your GitHub repo and paste the env vars into the Secrets panel.
+5. Add `HEALTHCHECK CMD cg health` to your Dockerfile — exits 0 when healthy, 1 when the DB, embedding model, or API key is unreachable.
+
+---
+
 ## Known Limitations
 
 | Limitation | Impact | Status |
@@ -380,6 +521,20 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
 pytest tests/ -v          # all 45 tests must pass
 python demo/run_demo.py   # demo must exit cleanly with 3 violations detected
 ```
+
+---
+
+## Ecosystem
+
+ConsistencyGuard is one layer of a three-part open-source AI trust stack. Each tool catches a different failure mode:
+
+| Failure mode | Tool | When it fires |
+|---|---|---|
+| AI contradicts itself over time | **ConsistencyGuard** *(this repo)* | After response |
+| AI answers from stale index | **[ARIA](https://github.com/Itachi-0xAI/aria)** | Before response |
+| AI decision has no reasoning trail | **[CoAgent](https://github.com/Itachi-0xAI/coagent)** | During decision |
+
+See [STACK.md](STACK.md) for the integration patterns and a worked end-to-end example.
 
 ---
 

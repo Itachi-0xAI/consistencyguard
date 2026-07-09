@@ -4,6 +4,7 @@ from consistencyguard.models import (
     LLMCall, SimilarCall, ConsistencyViolation, ViolationSeverity
 )
 from consistencyguard.store import get_all_calls
+from consistencyguard.tracing import span as _span
 from datetime import datetime, timedelta
 
 
@@ -30,30 +31,34 @@ def find_similar_calls(
         if window_days else None
     )
 
-    past_calls = get_all_calls()
-    matches = []
+    with _span("cg.find_similar") as active_span:
+        past_calls = get_all_calls()
+        matches = []
 
-    for past in past_calls:
-        if past.id == new_call.id:
-            continue
-        if past.prompt_embedding is None:
-            continue
-        if cutoff and past.timestamp < cutoff:
-            continue
-        sim = cosine_similarity(
-            new_call.prompt_embedding,
-            past.prompt_embedding
-        )
-        if sim >= threshold:
-            matches.append(SimilarCall(
-                call_id=past.id,
-                prompt=past.prompt,
-                response=past.response,
-                similarity_score=round(sim, 4),
-                timestamp=past.timestamp,
-            ))
+        for past in past_calls:
+            if past.id == new_call.id:
+                continue
+            if past.prompt_embedding is None:
+                continue
+            if cutoff and past.timestamp < cutoff:
+                continue
+            sim = cosine_similarity(
+                new_call.prompt_embedding,
+                past.prompt_embedding
+            )
+            if sim >= threshold:
+                matches.append(SimilarCall(
+                    call_id=past.id,
+                    prompt=past.prompt,
+                    response=past.response,
+                    similarity_score=round(sim, 4),
+                    timestamp=past.timestamp,
+                ))
 
-    return sorted(matches, key=lambda x: x.similarity_score, reverse=True)
+        result = sorted(matches, key=lambda x: x.similarity_score, reverse=True)
+        if active_span is not None:
+            active_span.set_attribute("cg.candidates_count", len(result))
+        return result
 
 
 def response_divergence(response_a: str, response_b: str) -> float:

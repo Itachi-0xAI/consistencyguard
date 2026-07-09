@@ -21,6 +21,7 @@ from consistencyguard.embedder import embed, cosine_similarity
 from consistencyguard.detector import response_divergence, classify_severity
 from consistencyguard.models import ViolationSeverity
 from consistencyguard.providers import get_provider, AnthropicProvider, OpenAIProvider
+from consistencyguard.tracing import span as _span
 
 ProviderArg = Optional[Union[str, AnthropicProvider, OpenAIProvider]]
 
@@ -113,13 +114,20 @@ def run_reliability_test(
     llm = _resolve_provider(provider, api_key)
     delay = float(os.getenv("RELIABILITY_RUN_DELAY", "0"))
 
-    responses = []
-    for i in range(runs):
-        responses.append(llm.complete(prompt, model, max_tokens=1024))
-        if delay > 0 and i < runs - 1:
-            time.sleep(delay)
+    with _span("cg.run_reliability_test", **{"cg.runs": runs}) as active_span:
+        responses = []
+        for i in range(runs):
+            responses.append(llm.complete(prompt, model, max_tokens=1024))
+            if delay > 0 and i < runs - 1:
+                time.sleep(delay)
 
-    return _build_report(prompt, model, responses, outlier_threshold)
+        report = _build_report(prompt, model, responses, outlier_threshold)
+
+        if active_span is not None:
+            active_span.set_attribute("cg.reliability_score", report.reliability_score)
+            active_span.set_attribute("cg.verdict", report.verdict)
+
+    return report
 
 
 async def arun_reliability_test(
@@ -130,13 +138,22 @@ async def arun_reliability_test(
     api_key: str = None,
     outlier_threshold: float = 0.25,
 ) -> HallucinationDiffReport:
-    """Async version — runs all N calls concurrently."""
+    """Async version — sequential when RELIABILITY_RUN_DELAY > 0 (respects free-tier quotas)."""
     model = _resolve_model(model)
     llm = _resolve_provider(provider, api_key)
-    responses = await asyncio.gather(
-        *[llm.acomplete(prompt, model, max_tokens=1024) for _ in range(runs)]
-    )
-    return _build_report(prompt, model, list(responses), outlier_threshold)
+    delay = float(os.getenv("RELIABILITY_RUN_DELAY", "0"))
+
+    if delay > 0:
+        responses = []
+        for i in range(runs):
+            responses.append(await llm.acomplete(prompt, model, max_tokens=1024))
+            if delay > 0 and i < runs - 1:
+                await asyncio.sleep(delay)
+    else:
+        responses = list(await asyncio.gather(
+            *[llm.acomplete(prompt, model, max_tokens=1024) for _ in range(runs)]
+        ))
+    return _build_report(prompt, model, responses, outlier_threshold)
 
 
 def _build_report(

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 from enum import Enum
 
@@ -8,6 +8,11 @@ class ViolationSeverity(str, Enum):
     CRITICAL = "critical"   # responses contradict each other
     WARNING = "warning"     # responses differ materially
     INFO = "info"           # minor phrasing variation
+
+
+class ValidationIssue(str, Enum):
+    INVALID_JSON = "invalid_json"       # response could not be parsed as JSON
+    SCHEMA_MISMATCH = "schema_mismatch" # parsed JSON missing required keys or wrong types
 
 
 class LLMCall(BaseModel):
@@ -28,6 +33,7 @@ class SimilarCall(BaseModel):
     timestamp: datetime
 
 
+
 class ConsistencyViolation(BaseModel):
     call_id_new: int
     call_id_ref: int
@@ -40,6 +46,7 @@ class ConsistencyViolation(BaseModel):
     explanation: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     agent_id: str = "default"
+    validation_issues: list[ValidationIssue] = Field(default_factory=list)
 
 
 class GuardReport(BaseModel):
